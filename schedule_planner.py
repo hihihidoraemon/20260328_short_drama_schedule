@@ -370,7 +370,8 @@ def _assign_round_robin(
     channels = _renumber_priority(channels, channel_priority_col)
     candidate_pool = pool_df[pool_df["_lang_norm"] == language].copy()
     if "pool_uid" not in candidate_pool.columns:
-        candidate_pool["pool_uid"] = candidate_pool.index.map(lambda x: f"idx::{x}")
+        # 各语种池行号均从 0 起，pool_uid 须含 language，否则全局 used_pool_ids 会跨语种冲突
+        candidate_pool["pool_uid"] = candidate_pool.index.map(lambda x: f"{language}::idx::{x}")
     candidate_pool = candidate_pool[~candidate_pool["pool_uid"].isin(used_pool_ids)].copy()
     candidate_pool = candidate_pool.sort_values("pool_rank").reset_index()
     if candidate_pool.empty:
@@ -519,12 +520,16 @@ def _assign_distribution(channels: pd.DataFrame, dist_pool_ypp_yes: pd.DataFrame
     priority_col = "频道同一语种下排序优先级"
     loops = [
         ("英文", "是"),
+        ("繁体中文", "是"),
         ("阿语", "是"),
         ("西班牙语", "是"),
+        ("越南语", "是"),
         ("印尼语", "是"),
         ("英文", "否"),
+        ("繁体中文", "否"),
         ("阿语", "否"),
         ("西班牙语", "否"),
+        ("越南语", "否"),
         ("印尼语", "否"),
     ]
 

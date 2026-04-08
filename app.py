@@ -3,7 +3,7 @@ import pandas as pd
 import tempfile
 import os
 import io
-from schedule_planner import run_scheduler, DEFAULT_LANGUAGES
+from schedule_planner import run_scheduler
 
 st.set_page_config(
     page_title="剧集排期规划系统",
@@ -26,18 +26,11 @@ with st.sidebar:
         help="用于控制随机分配的种子值，相同种子会产生相同结果"
     )
 
-    st.subheader("语种配置")
-    languages_input = st.text_area(
-        "默认语种（逗号分隔）",
-        value=",".join(DEFAULT_LANGUAGES),
-        help="当剧单语种为空时使用的默认语种列表"
-    )
-
     st.markdown("---")
     st.markdown("""
     ### 📋 使用说明
     1. 上传包含3个工作表的Excel文件
-    2. 配置随机种子和语种参数
+    2. 配置随机种子
     3. 点击"开始排期"按钮
     4. 下载生成的排期结果
 
@@ -115,9 +108,6 @@ if uploaded_file is not None:
     if st.button("🚀 开始排期", type="primary", use_container_width=True):
         try:
             with st.spinner("正在处理排期，请稍候..."):
-                # 解析语种列表
-                languages = [x.strip() for x in languages_input.split(",") if x.strip()]
-
                 # 创建临时文件
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_input:
                     tmp_input.write(uploaded_file.getvalue())
@@ -130,8 +120,7 @@ if uploaded_file is not None:
                 run_scheduler(
                     input_excel=tmp_input_path,
                     output_excel=tmp_output_path,
-                    seed=seed,
-                    languages=languages
+                    seed=seed
                 )
 
                 # 读取结果

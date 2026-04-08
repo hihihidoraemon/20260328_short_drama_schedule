@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import tempfile
 import os
+import io
 from schedule_planner import run_scheduler, DEFAULT_LANGUAGES
 
 st.set_page_config(
@@ -145,7 +146,7 @@ if uploaded_file is not None:
 
             # 显示结果预览
             st.subheader("📊 结果预览")
-            result_xls = pd.ExcelFile(result_data)
+            result_xls = pd.ExcelFile(io.BytesIO(result_data))
 
             tab_result, tab_warning, tab_priority = st.tabs(["排期结果", "告警信息", "频道优先级"])
 

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import pandas as pd
 
 
-DEFAULT_LANGUAGES = ["繁体中文", "阿语", "越南语", "西班牙语", "英文", "印尼语"]
+DEFAULT_LANGUAGES = ["繁体中文", "阿语", "越南语", "西班牙语", "英文", "印尼语", "葡萄牙语", "菲律宾语"]
 WEEK_DAYS = [1, 2, 3, 4, 5, 6, 7]
 DRAMABOX_SOURCES = {"Dramabox最新剧单", "七星Dramabox收益榜单"}
 CHANNEL_LANG_COL = "频道语种(可多填)"
@@ -30,6 +30,15 @@ LANG_ALIASES = {
     "阿拉伯语": "阿语",
     "越南语": "越南语",
     "印尼语": "印尼语",
+    "葡萄牙语": "葡萄牙语",
+    "葡语": "葡萄牙语",
+    "portuguese": "葡萄牙语",
+    "pt": "葡萄牙语",
+    "菲律宾语": "菲律宾语",
+    "菲律宾": "菲律宾语",
+    "filipino": "菲律宾语",
+    "tagalog": "菲律宾语",
+    "tl": "菲律宾语",
 }
 
 
@@ -445,6 +454,7 @@ def _assign_full_version(
     channels: pd.DataFrame,
     full_pool_ranked_by_lang_tier: Dict[Tuple[str, str], pd.DataFrame],
     channel_history_set: Set[Tuple[str, ...]],
+    languages: Sequence[str],
 ) -> Tuple[pd.DataFrame, List[Dict]]:
     used = set()
     used_unique = set()
@@ -452,7 +462,7 @@ def _assign_full_version(
     all_rows = []
     warns = []
     priority_col = "频道同一语种下排序优先级"
-    for lang in ["英文", "繁体中文", "阿语", "西班牙语", "越南语", "印尼语"]:
+    for lang in languages:
         lang_channels = channels[channels["_lang_set"].map(lambda s: lang in s)].copy()
         if lang_channels.empty:
             continue
@@ -487,7 +497,7 @@ def _assign_full_version(
                 english_assigned_counter=english_counter,
                 channel_history_set=channel_history_set,
                 scan_from_head=(lang != "英文"),
-                enforce_lang_unique=(lang != "英文"),
+                enforce_lang_unique=True,
             )
             used = res.used_pool_ids
             used_unique = res.used_unique_keys
@@ -497,7 +507,12 @@ def _assign_full_version(
     return (pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame(), warns)
 
 
-def _assign_distribution(channels: pd.DataFrame, dist_pool_ypp_yes: pd.DataFrame, dist_pool_ypp_no: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict]]:
+def _assign_distribution(
+    channels: pd.DataFrame,
+    dist_pool_ypp_yes: pd.DataFrame,
+    dist_pool_ypp_no: pd.DataFrame,
+    languages: Sequence[str],
+) -> Tuple[pd.DataFrame, List[Dict]]:
     used = set()
     used_unique = set()
     lang_drama_counts = {}
@@ -518,20 +533,7 @@ def _assign_distribution(channels: pd.DataFrame, dist_pool_ypp_yes: pd.DataFrame
         all_rows.append(pd.DataFrame(paid_rows))
 
     priority_col = "频道同一语种下排序优先级"
-    loops = [
-        ("英文", "是"),
-        ("繁体中文", "是"),
-        ("阿语", "是"),
-        ("西班牙语", "是"),
-        ("越南语", "是"),
-        ("印尼语", "是"),
-        ("英文", "否"),
-        ("繁体中文", "否"),
-        ("阿语", "否"),
-        ("西班牙语", "否"),
-        ("越南语", "否"),
-        ("印尼语", "否"),
-    ]
+    loops = [(lang, ypp) for ypp in ("是", "否") for lang in languages]
 
     for lang, ypp in loops:
         c = channels[
@@ -558,7 +560,7 @@ def _assign_distribution(channels: pd.DataFrame, dist_pool_ypp_yes: pd.DataFrame
             lang_drama_counts=lang_drama_counts,
             english_assigned_counter=english_counter,
             scan_from_head=False,
-            enforce_lang_unique=False,
+            enforce_lang_unique=True,
             max_per_lang_drama=(2 if ypp == "否" else None),
         )
         used = res.used_pool_ids
@@ -740,7 +742,12 @@ def run_scheduler(input_excel: str, output_excel: str, seed: int = 2026, languag
                 seed=seed,
             )
 
-    full_assigned, full_warns = _assign_full_version(full_channels, full_pool_ranked, channel_history_set)
+    full_assigned, full_warns = _assign_full_version(
+        full_channels,
+        full_pool_ranked,
+        channel_history_set,
+        languages=languages,
+    )
 
     # Point4 Step1: internal + short drama + distribution channels
     dist_channels = channel_df[
@@ -766,7 +773,12 @@ def run_scheduler(input_excel: str, output_excel: str, seed: int = 2026, languag
     dist_pool_no = _build_distribution_pool(dist_base, source_order=source_order_ypp_no)
     dist_pool_yes["pool_uid"] = dist_pool_yes.index.map(lambda x: f"yes::{x}")
     dist_pool_no["pool_uid"] = dist_pool_no.index.map(lambda x: f"no::{x}")
-    dist_assigned, dist_warns = _assign_distribution(dist_channels, dist_pool_yes, dist_pool_no)
+    dist_assigned, dist_warns = _assign_distribution(
+        dist_channels,
+        dist_pool_yes,
+        dist_pool_no,
+        languages=languages,
+    )
 
     # Merge assignment
     all_assigned = pd.concat([full_assigned, dist_assigned], ignore_index=True, sort=False) if (not full_assigned.empty or not dist_assigned.empty) else pd.DataFrame()

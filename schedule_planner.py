@@ -61,6 +61,24 @@ def _split_languages(v: str) -> Set[str]:
     return vals
 
 
+def _split_languages_ordered(v: str) -> List[str]:
+    s = _norm_str(v)
+    if not s:
+        return []
+    vals = []
+    seen = set()
+    for x in re.split(r"[，,、/|;\s]+", s):
+        x = x.strip()
+        if not x:
+            continue
+        n = LANG_ALIASES.get(x, x)
+        if n in seen:
+            continue
+        seen.add(n)
+        vals.append(n)
+    return vals
+
+
 def _contains_keyword(v: str, keyword: str) -> bool:
     return keyword in _norm_str(v)
 
@@ -199,10 +217,16 @@ def _build_channel_history_set(hist30: pd.DataFrame) -> Set[Tuple[str, ...]]:
     return keys
 
 
-def _english_overlap_adjust(channel_row: pd.Series, req_num: int, assigned_english_num: int, lang: str) -> int:
-    lang_set = _split_languages(channel_row.get(CHANNEL_LANG_COL, ""))
-    if lang in {"西班牙语", "印尼语"} and "英文" in lang_set:
-        return max(0, req_num - assigned_english_num)
+def _fallback_overlap_adjust(channel_row: pd.Series, req_num: int, assigned_num: int, lang: str) -> int:
+    order = channel_row.get("_lang_order", [])
+    if not isinstance(order, list) or not order:
+        return req_num
+    try:
+        idx = order.index(lang)
+    except ValueError:
+        return req_num
+    if idx > 0:
+        return max(0, req_num - assigned_num)
     return req_num
 
 
@@ -344,11 +368,12 @@ def _assign_round_robin(
     used_pool_ids: Optional[Set[int]] = None,
     used_unique_keys: Optional[Set[Tuple[str, ...]]] = None,
     lang_drama_counts: Optional[Dict[Tuple[str, ...], int]] = None,
-    english_assigned_counter: Optional[Dict[str, int]] = None,
+    channel_assigned_counter: Optional[Dict[str, int]] = None,
     channel_history_set: Optional[Set[Tuple[str, ...]]] = None,
     scan_from_head: bool = False,
     enforce_lang_unique: bool = False,
     max_per_lang_drama: Optional[int] = None,
+    language_stage: Optional[int] = None,
 ) -> AssignmentResult:
     if used_pool_ids is None:
         used_pool_ids = set()
@@ -356,20 +381,25 @@ def _assign_round_robin(
         used_unique_keys = set()
     if lang_drama_counts is None:
         lang_drama_counts = {}
-    if english_assigned_counter is None:
-        english_assigned_counter = {}
+    if channel_assigned_counter is None:
+        channel_assigned_counter = {}
     if channel_history_set is None:
         channel_history_set = set()
 
     channels = channels_df.copy()
-    channels = channels[channels["_lang_set"].map(lambda s: language in s)].copy()
+    if language_stage is None:
+        channels = channels[channels["_lang_set"].map(lambda s: language in s)].copy()
+    else:
+        channels = channels[
+            channels["_lang_order"].map(lambda ls: isinstance(ls, list) and len(ls) > language_stage and ls[language_stage] == language)
+        ].copy()
     if channels.empty:
         return AssignmentResult(pd.DataFrame(), used_pool_ids, used_unique_keys, lang_drama_counts, [])
 
     channels["need_num_raw"] = channels["本周排期要求"].map(lambda x: _extract_required_num(x, demand_keyword))
-    channels["already_assigned"] = channels["频道链接"].map(lambda x: english_assigned_counter.get(_norm_str(x), 0)).fillna(0).astype(int)
+    channels["already_assigned"] = channels["频道链接"].map(lambda x: channel_assigned_counter.get(_norm_str(x), 0)).fillna(0).astype(int)
     channels["need_num"] = channels.apply(
-        lambda r: _english_overlap_adjust(r, int(r["need_num_raw"]), int(r["already_assigned"]), language),
+        lambda r: _fallback_overlap_adjust(r, int(r["need_num_raw"]), int(r["already_assigned"]), language),
         axis=1,
     )
     channels = channels[channels["need_num"] > 0].copy()
@@ -443,8 +473,7 @@ def _assign_round_robin(
                     "告警": "剧库不足",
                 }
             )
-        if language == "英文":
-            english_assigned_counter[_norm_str(ch["频道链接"])] = english_assigned_counter.get(_norm_str(ch["频道链接"]), 0) + got
+        channel_assigned_counter[_norm_str(ch["频道链接"])] = channel_assigned_counter.get(_norm_str(ch["频道链接"]), 0) + got
 
     assigned_df = pd.DataFrame(assignment_rows)
     return AssignmentResult(assigned_df, used_pool_ids, used_unique_keys, lang_drama_counts, warnings)
@@ -458,52 +487,57 @@ def _assign_full_version(
 ) -> Tuple[pd.DataFrame, List[Dict]]:
     used = set()
     used_unique = set()
-    english_counter = {}
+    assigned_counter = {}
     all_rows = []
     warns = []
     priority_col = "频道同一语种下排序优先级"
-    for lang in languages:
-        lang_channels = channels[channels["_lang_set"].map(lambda s: lang in s)].copy()
-        if lang_channels.empty:
-            continue
-        for tier in ["男频", "女频"]:
-            c2 = lang_channels[lang_channels["频道一级品类(男频/女频)"] == tier].copy()
-            pool = full_pool_ranked_by_lang_tier.get((lang, tier), pd.DataFrame())
-            if c2.empty or pool.empty:
-                for _, cc in c2.iterrows():
-                    need = _extract_required_num(cc["本周排期要求"], "完整版短剧")
-                    need = _english_overlap_adjust(cc, need, english_counter.get(_norm_str(cc["频道链接"]), 0), lang)
-                    if need > 0:
-                        warns.append(
-                            {
-                                "频道链接": cc["频道链接"],
-                                "频道语种(可多填)": cc[CHANNEL_LANG_COL],
-                                "需求量": need,
-                                "已排量": 0,
-                                "缺口": need,
-                                "告警": "完整版短剧剧库不足",
-                            }
-                        )
+    max_stage = int(channels["_lang_order"].map(len).max()) if (not channels.empty and "_lang_order" in channels.columns) else 0
+    for stage in range(max_stage):
+        for lang in languages:
+            lang_channels = channels[
+                channels["_lang_order"].map(lambda ls: isinstance(ls, list) and len(ls) > stage and ls[stage] == lang)
+            ].copy()
+            if lang_channels.empty:
                 continue
-            res = _assign_round_robin(
-                channels_df=c2,
-                pool_df=pool,
-                demand_keyword="完整版短剧",
-                language=lang,
-                channel_priority_col=priority_col,
-                content_tier_col="一级品类(男频/女频)",
-                used_pool_ids=used,
-                used_unique_keys=used_unique,
-                english_assigned_counter=english_counter,
-                channel_history_set=channel_history_set,
-                scan_from_head=(lang != "英文"),
-                enforce_lang_unique=True,
-            )
-            used = res.used_pool_ids
-            used_unique = res.used_unique_keys
-            if not res.assigned.empty:
-                all_rows.append(res.assigned)
-            warns.extend(res.warnings)
+            for tier in ["男频", "女频"]:
+                c2 = lang_channels[lang_channels["频道一级品类(男频/女频)"] == tier].copy()
+                pool = full_pool_ranked_by_lang_tier.get((lang, tier), pd.DataFrame())
+                if c2.empty or pool.empty:
+                    for _, cc in c2.iterrows():
+                        need = _extract_required_num(cc["本周排期要求"], "完整版短剧")
+                        need = _fallback_overlap_adjust(cc, need, assigned_counter.get(_norm_str(cc["频道链接"]), 0), lang)
+                        if need > 0:
+                            warns.append(
+                                {
+                                    "频道链接": cc["频道链接"],
+                                    "频道语种(可多填)": cc[CHANNEL_LANG_COL],
+                                    "需求量": need,
+                                    "已排量": 0,
+                                    "缺口": need,
+                                    "告警": "完整版短剧剧库不足",
+                                }
+                            )
+                    continue
+                res = _assign_round_robin(
+                    channels_df=c2,
+                    pool_df=pool,
+                    demand_keyword="完整版短剧",
+                    language=lang,
+                    channel_priority_col=priority_col,
+                    content_tier_col="一级品类(男频/女频)",
+                    used_pool_ids=used,
+                    used_unique_keys=used_unique,
+                    channel_assigned_counter=assigned_counter,
+                    channel_history_set=channel_history_set,
+                    scan_from_head=(lang != "英文"),
+                    enforce_lang_unique=True,
+                    language_stage=stage,
+                )
+                used = res.used_pool_ids
+                used_unique = res.used_unique_keys
+                if not res.assigned.empty:
+                    all_rows.append(res.assigned)
+                warns.extend(res.warnings)
     return (pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame(), warns)
 
 
@@ -516,7 +550,7 @@ def _assign_distribution(
     used = set()
     used_unique = set()
     lang_drama_counts = {}
-    english_counter = {}
+    assigned_counter = {}
     all_rows = []
     warns = []
 
@@ -533,42 +567,44 @@ def _assign_distribution(
         all_rows.append(pd.DataFrame(paid_rows))
 
     priority_col = "频道同一语种下排序优先级"
-    loops = [(lang, ypp) for ypp in ("是", "否") for lang in languages]
-
-    for lang, ypp in loops:
-        c = channels[
-            (channels["本周排期要求"].fillna("").str.contains("分销", regex=False))
-            & (channels["_lang_set"].map(lambda s: lang in s))
-            & (channels["是否过了YPP"].fillna("") == ypp)
-        ].copy()
-        if c.empty:
-            continue
-        base_pool = dist_pool_ypp_yes if ypp == "是" else dist_pool_ypp_no
-        pool = base_pool[(base_pool["是否为投流剧"] == "否") & (base_pool["_lang_norm"] == lang)].copy()
-        pool = pool[~pool.index.isin(used)].copy()
-        pool = pool.sort_values("pool_rank").reset_index(drop=True)
-        pool["pool_rank"] = range(1, len(pool) + 1)
-        res = _assign_round_robin(
-            channels_df=c,
-            pool_df=pool,
-            demand_keyword="分销",
-            language=lang,
-            channel_priority_col=priority_col,
-            content_tier_col="",
-            used_pool_ids=used,
-            used_unique_keys=used_unique,
-            lang_drama_counts=lang_drama_counts,
-            english_assigned_counter=english_counter,
-            scan_from_head=False,
-            enforce_lang_unique=True,
-            max_per_lang_drama=(2 if ypp == "否" else None),
-        )
-        used = res.used_pool_ids
-        used_unique = res.used_unique_keys
-        lang_drama_counts = res.lang_drama_counts
-        if not res.assigned.empty:
-            all_rows.append(res.assigned)
-        warns.extend(res.warnings)
+    max_stage = int(channels["_lang_order"].map(len).max()) if (not channels.empty and "_lang_order" in channels.columns) else 0
+    for ypp in ("是", "否"):
+        for stage in range(max_stage):
+            for lang in languages:
+                c = channels[
+                    (channels["本周排期要求"].fillna("").str.contains("分销", regex=False))
+                    & (channels["是否过了YPP"].fillna("") == ypp)
+                    & (channels["_lang_order"].map(lambda ls: isinstance(ls, list) and len(ls) > stage and ls[stage] == lang))
+                ].copy()
+                if c.empty:
+                    continue
+                base_pool = dist_pool_ypp_yes if ypp == "是" else dist_pool_ypp_no
+                pool = base_pool[(base_pool["是否为投流剧"] == "否") & (base_pool["_lang_norm"] == lang)].copy()
+                pool = pool[~pool.index.isin(used)].copy()
+                pool = pool.sort_values("pool_rank").reset_index(drop=True)
+                pool["pool_rank"] = range(1, len(pool) + 1)
+                res = _assign_round_robin(
+                    channels_df=c,
+                    pool_df=pool,
+                    demand_keyword="分销",
+                    language=lang,
+                    channel_priority_col=priority_col,
+                    content_tier_col="",
+                    used_pool_ids=used,
+                    used_unique_keys=used_unique,
+                    lang_drama_counts=lang_drama_counts,
+                    channel_assigned_counter=assigned_counter,
+                    scan_from_head=False,
+                    enforce_lang_unique=True,
+                    max_per_lang_drama=(2 if ypp == "否" else None),
+                    language_stage=stage,
+                )
+                used = res.used_pool_ids
+                used_unique = res.used_unique_keys
+                lang_drama_counts = res.lang_drama_counts
+                if not res.assigned.empty:
+                    all_rows.append(res.assigned)
+                warns.extend(res.warnings)
 
     return (pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame(), warns)
 
@@ -715,6 +751,7 @@ def run_scheduler(input_excel: str, output_excel: str, seed: int = 2026, languag
     # Point2: rebuild channel priority with tie randomization
     channel_df = _rebuild_channel_priority(channel_df, seed=seed)
     channel_df["_lang_set"] = channel_df[CHANNEL_LANG_COL].map(_split_languages)
+    channel_df["_lang_order"] = channel_df[CHANNEL_LANG_COL].map(_split_languages_ordered)
 
     # Point3 Step2: expand language when empty
     week_expanded = _expand_language_if_empty(week_df, languages=languages)
